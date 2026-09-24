@@ -53,6 +53,16 @@ echo '{"ok":true,"result":{"message_id":1,"chat":{"id":1}}}'
 SH
 chmod +x "$TMP/stub/curl"
 
+# GNU timeout is what the morning run wraps the formatter with. env -i on macOS
+# has none on PATH, so without a stub every formatter call fails instantly and
+# the suite only ever exercises the raw fallback.
+cat > "$TMP/stub/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+chmod +x "$TMP/stub/timeout"
+
 # As above, but with the locale and the Python UTF-8 variables removed — the
 # environment cron actually provides. The script is supposed to supply those
 # itself; nothing else here proves it does.
@@ -107,8 +117,14 @@ echo "$out" | grep -q 'Test message sent' ||
 
 # --- 2. The whole report path, with the underscore that caused all this ----
 # Stub ruby and claude so the script reaches its real send with known text.
+# Real ruby still handles -ryaml / -e: daily-standup.sh loads share_* that way,
+# and a stub that answers every ruby call with a standup body makes `eval`
+# try to run "•" as a command.
 cat > "$TMP/stub/ruby" <<'SH'
 #!/usr/bin/env bash
+case " $* " in
+  *" -ryaml "*|*" -e "*) exec /usr/bin/ruby "$@" ;;
+esac
 printf '#alpha\n• Build config: dart_defines from production.env\n'
 SH
 cat > "$TMP/stub/claude" <<'SH'

@@ -323,7 +323,13 @@ fi
 # share_header / share_footer from standup.yml. {date} → TODAY. Footer is plain
 # text only — the blank line before it is added when appending, not in the file.
 # Shellwords so a header with apostrophes or spaces cannot break `eval`.
-eval "$(ruby -ryaml -rshellwords -e '
+# RUBYOPT: cron/tests may run with LC_ALL=C; the default header holds emoji and
+# an ASCII default external encoding refuses the -e script before it can run.
+# Defaults + || true: a failed eval must not leave SHARE_* unset under set -u
+# (cron would abort before Telegram ever sees the report).
+SHARE_HEADER="📋 Daily Standup — $TODAY"
+SHARE_FOOTER=""
+eval "$(RUBYOPT="-Eutf-8:utf-8" ruby -ryaml -rshellwords -e '
 path, date = ARGV[0], ARGV[1]
 raw = File.read(path)
 cfg = YAML.safe_load(raw, permitted_classes: [], permitted_symbols: [], aliases: true) || {}
@@ -333,7 +339,7 @@ footer = (cfg["share_footer"] || "").to_s.strip
 header = header.gsub("{date}", date)
 puts "SHARE_HEADER=#{Shellwords.escape(header)}"
 puts "SHARE_FOOTER=#{Shellwords.escape(footer)}"
-' "$STANDUP_CONFIG" "$TODAY")"
+' "$STANDUP_CONFIG" "$TODAY")" || true
 
 # Build standup args
 # An array, not a string: word splitting would turn a config path containing a

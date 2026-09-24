@@ -808,10 +808,13 @@ def split_share_frame(text):
         if is_trailer_block(block):
             trailer_i = i
 
+    # Leading matter that is not a real project (hashtag + bullets) is the
+    # title / share_header. A lone #hashtag as the first block is the configured
+    # title, not a project — otherwise for_x would turn it into "Name — URL".
     if trailer_i is not None:
         i = 0
         head = []
-        while i < trailer_i and not is_slot(blocks[i]):
+        while i < trailer_i and not is_real_project(blocks[i]):
             head.append(blocks[i])
             i += 1
         body = blocks[i:trailer_i]
@@ -825,7 +828,7 @@ def split_share_frame(text):
 
     i = 0
     head = []
-    while i < len(rest) and not is_slot(rest[i]):
+    while i < len(rest) and not is_real_project(rest[i]):
         head.append(rest[i])
         i += 1
     return join(head), join(rest[i:]), join(tail)
@@ -893,10 +896,10 @@ def shuffle_projects(text, seed, lead_out=None):
     exception would lose the press and the day. Any failure falls back to the
     plain seeded shuffle.
     """
-    head, body, tail = split_share_frame(text)
-    if not body:
-        return text
     try:
+        head, body, tail = split_share_frame(text)
+        if not body:
+            return text
         shuffled = _shuffle_body(body, seed, lead_out=lead_out)
     except Exception as e:  # noqa: BLE001 - never lose the day
         warn(f"shuffle failed, keeping original order: {e}")
@@ -938,10 +941,17 @@ def for_x(text, seed, lead_out=None):
 
     If wip.co cannot be reached, the hashtags stay. A post that reads a little
     worse beats no post at all.
+
+    Nothing here may raise. Same contract as shuffle_projects: the update offset
+    is already advanced by the time this runs.
     """
-    head, body, tail = split_share_frame(text)
-    if body:
-        body = _shuffle_body(body, seed, lead_out=lead_out)
+    try:
+        head, body, tail = split_share_frame(text)
+        if body:
+            body = _shuffle_body(body, seed, lead_out=lead_out)
+    except Exception as e:  # noqa: BLE001 - never lose the day
+        warn(f"for_x frame/shuffle failed, keeping original text: {e}")
+        return text
     try:
         projects = wip_projects()
     except Exception as e:  # noqa: BLE001 - never let this block a publish
@@ -1315,6 +1325,16 @@ def _selftest_body():
     assert tg.splitlines()[0] == "*\U0001F4CB Daily Standup — 2026\\-09\\-09*", tg.splitlines()[0]
     assert "\\." in tg, "a full stop is reserved in MarkdownV2 and must be escaped"
 
+    # share_header need not begin with 📋 — title is the first non-empty line
+    # that is not a project hashtag.
+    custom_title = "Morning notes — 2026-09-24"
+    custom = f"{custom_title}\n\n#alpha\n{subject}"
+    tg_c = to_markdown_v2(custom)
+    assert tg_c.splitlines()[0] == f"*{escape_mdv2(custom_title)}*", tg_c.splitlines()[0]
+    stripped_c = strip_telegram_markup(f"*{custom_title}*\n\n*#alpha*\n{subject}")
+    assert stripped_c.splitlines()[0] == custom_title, stripped_c.splitlines()[0]
+    assert stripped_c.splitlines()[2] == "#alpha", stripped_c
+
     # Every reserved character, including a literal backslash. Four assertions
     # would not support "a commit subject can hold anything".
     for ch in "_*[]()~`>#+-=|{}.!\\":
@@ -1585,6 +1605,7 @@ def _selftest_body():
     _reset_rotation()
     catalog = {
         "alpha": {"hashtag": "alpha", "name": "Alpha", "website_url": "https://alpha.example"},
+        "beta": {"hashtag": "beta", "name": "Beta", "website_url": "https://beta.example"},
         "foo": {"hashtag": "foo", "name": "Foo", "website_url": "https://foo.example"},
     }
     mod = sys.modules[__name__]
@@ -1633,6 +1654,18 @@ def _selftest_body():
         x_b = for_x(bullet, "2026-09-26")
         assert "fixed #foo in logs" in x_b, x_b
         assert "Alpha — https://alpha.example" in x_b, x_b
+
+        # A share_header that is itself a lone #hashtag must stay a title —
+        # not become "Alpha — URL" on X.
+        tag_title = (
+            "#alpha\n\n"
+            "#beta\n\u2022 one\n\n"
+            "1 projects"
+        )
+        x_tt = for_x(tag_title, "2026-09-27")
+        assert x_tt.startswith("#alpha"), x_tt
+        assert "Alpha —" not in x_tt, x_tt
+        assert "Beta — https://beta.example" in x_tt, x_tt
     finally:
         mod.wip_projects = real_wip
 
