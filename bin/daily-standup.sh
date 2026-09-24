@@ -320,6 +320,21 @@ if [ ! -s "$STANDUP_CONFIG" ] || ! grep -qE '^[[:space:]]*[^#[:space:]-]' "$STAN
   exit 1
 fi
 
+# share_header / share_footer from standup.yml. {date} → TODAY. Footer is plain
+# text only — the blank line before it is added when appending, not in the file.
+# Shellwords so a header with apostrophes or spaces cannot break `eval`.
+eval "$(ruby -ryaml -rshellwords -e '
+path, date = ARGV[0], ARGV[1]
+raw = File.read(path)
+cfg = YAML.safe_load(raw, permitted_classes: [], permitted_symbols: [], aliases: true) || {}
+cfg = {} unless cfg.is_a?(Hash)
+header = (cfg["share_header"] || "📋 Daily Standup — {date}").to_s
+footer = (cfg["share_footer"] || "").to_s.strip
+header = header.gsub("{date}", date)
+puts "SHARE_HEADER=#{Shellwords.escape(header)}"
+puts "SHARE_FOOTER=#{Shellwords.escape(footer)}"
+' "$STANDUP_CONFIG" "$TODAY")"
+
 # Build standup args
 # An array, not a string: word splitting would turn a config path containing a
 # space into two arguments and the run would fail on a path that is perfectly
@@ -341,7 +356,7 @@ RAW_STANDUP=$(ruby "$STANDUP_BIN" "${STANDUP_ARGS[@]}" 2>&1) || {
 }
 
 if [ -z "$RAW_STANDUP" ] || echo "$RAW_STANDUP" | grep -q "^No activity found"; then
-  send_telegram "📋 *Daily Standup — $TODAY*
+  send_telegram "$SHARE_HEADER
 
 No commits $DATE_LABEL. Rest day? 🏖️"
   echo "[$TODAY] No activity — message sent."
@@ -359,7 +374,7 @@ Here is the raw standup output (each section is a project hashtag, bullets are c
 $RAW_STANDUP
 
 Format this as a concise, scannable Telegram message:
-- Start with: 📋 *Daily Standup — $TODAY*
+- Start with exactly this title line (you may bold it with single asterisks): $SHARE_HEADER
 - Group by project hashtag (bold the hashtag)
 - Summarize related commits into one bullet where possible (don't repeat noise like 'chore: bump version')
 - Use plain language, not commit-speak
@@ -374,7 +389,7 @@ ANALYSIS=$(echo "$PROMPT" | timeout 120 "$CLAUDE_BIN" -p --model haiku 2>/dev/nu
 # Fallback: if Claude failed, send raw standup
 if [ -z "$ANALYSIS" ]; then
   echo "  Claude formatting failed, using raw fallback"
-  ANALYSIS="📋 *Daily Standup — $TODAY*
+  ANALYSIS="$SHARE_HEADER
 
 $RAW_STANDUP"
 fi
@@ -389,7 +404,7 @@ fi
 REPAIRED=$(printf '%s' "$ANALYSIS" | RAW_STANDUP="$RAW_STANDUP" \
   python3 "$SCRIPT_DIR/standup-publish.py" --repair-headers) && ANALYSIS="$REPAIRED" || {
   echo "  Formatter lost a project; publishing the raw standup instead"
-  ANALYSIS="📋 *Daily Standup — $TODAY*
+  ANALYSIS="$SHARE_HEADER
 
 $RAW_STANDUP"
 }
@@ -424,7 +439,7 @@ case $STRIP_STATUS in
   2)
     echo "[$TODAY] Every project was dropped by the private-line filter; nothing sent."
     disarm_today
-    send_telegram "🔒 *Daily Standup — $TODAY*
+    send_telegram "🔒 $SHARE_HEADER
 
 Niente da pubblicare: ogni riga era di sicurezza. Nessun report inviato."
     exit 0
@@ -435,7 +450,7 @@ Niente da pubblicare: ogni riga era di sicurezza. Nessun report inviato."
     # would send somebody to look in the wrong place.
     echo "[$TODAY] The report has no project blocks; nothing sent."
     disarm_today
-    send_telegram "⚠️ *Daily Standup — $TODAY*
+    send_telegram "⚠️ $SHARE_HEADER
 
 Il report non contiene nessun progetto: la formattazione è fallita a monte. Non ho inviato niente. Controlla il log."
     exit 1
@@ -443,12 +458,20 @@ Il report non contiene nessun progetto: la formattazione è fallita a monte. Non
   *)
     echo "[$TODAY] The private-line filter itself failed; nothing sent."
     disarm_today
-    send_telegram "⚠️ *Daily Standup — $TODAY*
+    send_telegram "⚠️ $SHARE_HEADER
 
 Il filtro delle righe di sicurezza non ha funzionato. Non ho inviato niente, per non pubblicare un report non filtrato. Controlla il log."
     exit 1
     ;;
 esac
+
+# share_footer is config text only: trim already done when loading, and the
+# blank line before it is added here so the yml never needs a leading newline.
+if [ -n "$SHARE_FOOTER" ]; then
+  ANALYSIS="${ANALYSIS}
+
+${SHARE_FOOTER}"
+fi
 
 # ---- Send to Telegram, with the button that publishes it ----
 #

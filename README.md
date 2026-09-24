@@ -145,6 +145,10 @@ repo_name_mapping:
 exclude_repos:
   - some-client-work
   - unannounced-side-project
+
+# Title and closing line of the message you approve and publish.
+# share_header: "📋 Building in public — {date}"
+# share_footer: "#buildinpublic #indiehackers"
 ```
 
 ### `repo_name_mapping`
@@ -163,6 +167,18 @@ cannot quietly un-hide it. An entry that matches no repository is a warning on
 stderr, because that typo does not look like a mistake — the repository it was
 meant to hide is simply reported as usual.
 
+### `share_header`
+
+The title line of the morning message and of every published copy. `{date}` is
+replaced with `YYYY-MM-DD`. If omitted, the default is
+`📋 Daily Standup — {date}`.
+
+### `share_footer`
+
+Optional text appended after the report body (after the project-count line).
+Put only the footer contents in the file — a blank line before it is added
+automatically. The same footer goes to Telegram, X, wip.co, and LinkedIn.
+
 ## Publishing the report
 
 A hashtag in a [wip.co](https://wip.co) todo attaches it to that project, which
@@ -173,6 +189,13 @@ post.
 
 Keep private work out with `exclude_repos` before you publish anywhere. A
 repository name is a small thing to leak and an awkward one to take back.
+
+### Framing the shared post
+
+`share_header` and `share_footer` frame the message on every destination. On X,
+only project hashtags in the *body* are rewritten as `Name — website`; the
+title and the footer stay as written, so social hashtags belong in
+`share_footer` rather than among the project lines.
 
 ### The publisher in `bin/`
 
@@ -190,11 +213,12 @@ history and can be reviewed:
 and expires quietly. Each destination is recorded separately, so a day that
 reached X but not wip.co can be retried without tweeting it twice.
 
-The two texts differ on purpose. wip.co needs the hashtags, because that is what
-attaches a todo to a project there; on X a row of hashtags is just noise, so
-they are swapped for each project's name and website, read from wip.co at
-publish time. The X form is sent to you as a reply, so you approve the text you
-will actually post.
+The two texts differ on purpose. wip.co needs the project hashtags, because that
+is what attaches a todo to a project there; on X a row of those is just noise,
+so each project header is swapped for that project's name and website, read from
+wip.co at publish time. The title (`share_header`) and the footer
+(`share_footer`) are left alone on every destination. The X form is sent to you
+as a reply, so you approve the text you will actually post.
 
 This half is not dependency-free: it needs `python3`, `curl`, a Claude CLI for
 the summary, and `bird` only if you publish to X. `bin/daily-standup.sh` also

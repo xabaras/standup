@@ -15,3 +15,11 @@ repo_name_mapping:
 exclude_repos:
   - some-client-work
   - unannounced-side-project
+
+# Optional: title of the shared message. {date} is replaced with YYYY-MM-DD.
+# Default if omitted: 📋 Daily Standup — {date}
+# share_header: "📋 Building in public — {date}"
+
+# Optional: text appended after the report (Telegram, X, wip.co, LinkedIn).
+# Write only the footer text — a blank line before it is added automatically.
+# share_footer: "#buildinpublic #indiehackers"
