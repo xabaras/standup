@@ -269,6 +269,25 @@ config_is_usable() {
   [ -n "$path" ] && [ -s "$path" ] && grep -qE '^[[:space:]]*[^#[:space:]-]' "$path"
 }
 
+# Match standup.rb without --config: ~/.standup.yml, then <repo>/standup.yml.
+# STANDUP_CONFIG in the environment wins and is not searched past.
+# On success sets STANDUP_CONFIG to the chosen path. On failure leaves it alone
+# when it was set by the caller; when searching, leaves it unset.
+resolve_standup_config() {
+  if [ -n "${STANDUP_CONFIG+set}" ]; then
+    config_is_usable "$STANDUP_CONFIG"
+    return $?
+  fi
+  local candidate
+  for candidate in "$HOME/.standup.yml" "$REPO_DIR/standup.yml"; do
+    if config_is_usable "$candidate"; then
+      STANDUP_CONFIG="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ---- Check mode: what did all of that resolve to? ----
 #
 # Placed before the credential check on purpose, and this is the whole point of
@@ -281,14 +300,24 @@ config_is_usable() {
 # first, then PATH, then the documented default. Printing PATH first would
 # name a binary the cron job will never call.
 if [ "${1:-}" = "--check" ]; then
-  cfg="${STANDUP_CONFIG:-$REPO_DIR/standup.yml}"
-  resolve_formatter "$cfg"
+  resolve_standup_config || true
+  if config_is_usable "${STANDUP_CONFIG:-}"; then
+    cfg="$STANDUP_CONFIG"
+    cfg_note=""
+  elif [ -n "${STANDUP_CONFIG+set}" ]; then
+    cfg="$STANDUP_CONFIG"
+    cfg_note=" (MISSING or EMPTY — copy standup.yml.example)"
+  else
+    cfg="$HOME/.standup.yml or $REPO_DIR/standup.yml"
+    cfg_note=" (MISSING or EMPTY — copy standup.yml.example)"
+  fi
+  resolve_formatter "${STANDUP_CONFIG:-}"
   echo "repository:    $REPO_DIR"
   echo "standup.rb:    $REPO_DIR/standup.rb $([ -f "$REPO_DIR/standup.rb" ] || echo '(MISSING)')"
   # -s, matching the guard below. With -f an empty config reports as present
   # here and is then refused at run time, so --check would describe a run that
   # cannot happen.
-  echo "report config: $cfg $([ -s "$cfg" ] || echo '(MISSING or EMPTY — copy standup.yml.example)')"
+  echo "report config: $cfg$cfg_note"
   echo "credentials:   $TELEGRAM_CREDS $([ -f "$TELEGRAM_CREDS" ] || echo '(MISSING — copy standup.env.example)')"
   echo "bot token:     $([ -n "${TELEGRAM_BOT_TOKEN:-}" ] && echo set || echo 'NOT SET')"
   echo "chat id:       $([ -n "${TELEGRAM_CHAT_ID:-}" ] && echo set || echo 'NOT SET')"
@@ -450,7 +479,6 @@ fi
 # ---- Config ----
 TODAY=$(date '+%Y-%m-%d')
 STANDUP_BIN="$REPO_DIR/standup.rb"
-STANDUP_CONFIG="${STANDUP_CONFIG:-$REPO_DIR/standup.yml}"
 
 # A missing report config is a leak, not an inconvenience, which is why this
 # refuses to run rather than carrying on with a default.
@@ -461,19 +489,36 @@ STANDUP_CONFIG="${STANDUP_CONFIG:-$REPO_DIR/standup.yml}"
 # to X and wip.co. Every private repository under the projects root would be
 # named, under its own directory name, in public.
 #
+# Lookup matches standup.rb without --config: ~/.standup.yml, then the clone's
+# standup.yml. STANDUP_CONFIG in the environment still wins and is not searched
+# past — an explicit path that is missing stays an error.
+#
 # Checked here and not earlier on purpose: --test and --check must still work on
 # a fresh clone, because proving the bot works is the first thing anyone does.
 # Not just non-empty: a file of blank lines, or one holding nothing but "---",
 # is a zero-byte config as far as the report is concerned, and the whole point
 # of this guard is what an empty config publishes.
-if ! config_is_usable "$STANDUP_CONFIG"; then
-  echo "ERROR: no usable report config at $STANDUP_CONFIG"
+_CONFIG_FROM_ENV=0
+[ -n "${STANDUP_CONFIG+set}" ] && _CONFIG_FROM_ENV=1
+if ! resolve_standup_config; then
+  if [ "$_CONFIG_FROM_ENV" -eq 1 ]; then
+    echo "ERROR: no usable report config at $STANDUP_CONFIG"
+    echo "Copy standup.yml.example to that path and edit it, or set STANDUP_CONFIG to a usable file."
+  else
+    echo "ERROR: no usable report config"
+    echo "Looked in: $HOME/.standup.yml and $REPO_DIR/standup.yml"
+    echo "Copy standup.yml.example to either path and edit it, or set STANDUP_CONFIG."
+  fi
   # -s, not -f: an empty file parses to an empty config, which is exactly the
   # publish-everything case this guard exists to stop.
-  echo "Copy standup.yml.example to that path and edit it, or set STANDUP_CONFIG."
   echo "Refusing to run: without it, every repository would be published by directory name."
   exit 1
 fi
+unset _CONFIG_FROM_ENV
+# Every run: which file won. Home beating the clone's standup.yml is easy to
+# miss, and a home file without exclude_repos publishes repositories the repo
+# config meant to hide.
+echo "using config: $STANDUP_CONFIG"
 
 # share_header / share_footer from standup.yml. {date} → TODAY. Footer is plain
 # text only — the blank line before it is added when appending, not in the file.

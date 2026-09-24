@@ -703,6 +703,10 @@ echo "$out" | grep -q "unknown formatter 'foo'; using claude" ||
 call "$TMP/unknown-fmt.log" 1 | grep -q 'dart\\_defines' ||
   failures+=("unknown-formatter fallback did not reach Telegram")
 
+# --- 15. Config lookup: home, repo, both, empty STANDUP_CONFIG ------------
+# Placeholder — Round 2 refuses both files (AMBIGUOUS). Filled in after pick.
+printf 'projects_root: %s\n' "$TMP/projects" > "$WORK/standup.yml"
+
 if [ ${#failures[@]} -eq 0 ]; then
   echo 'ok: the report reaches Telegram escaped, retries unescaped, and refuses to send what it could not filter'
 else
