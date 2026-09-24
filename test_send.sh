@@ -121,9 +121,9 @@ echo "$out" | grep -q 'Test message sent' ||
 
 # --- 2. The whole report path, with the underscore that caused all this ----
 # Stub ruby and claude so the script reaches its real send with known text.
-# Real ruby still handles -ryaml / -e: daily-standup.sh loads share_* that way,
-# and a stub that answers every ruby call with a standup body makes `eval`
-# try to run "•" as a command.
+# Real ruby still handles -ryaml / -e: daily-standup.sh loads share_* and
+# formatter settings that way, and a stub that answers every ruby call with a
+# standup body makes `eval` try to run "•" as a command.
 cat > "$TMP/stub/ruby" <<SH
 #!/usr/bin/env bash
 case " \$* " in
@@ -388,7 +388,7 @@ for rc_file in .zshrc .bashrc; do
     failures+=("$rc_file's chat id was used for the report")
 
   out=$(CLAUDE_BIN=/cron/line/claude run "$TMP/override-$rc_file-check.log" --check)
-  echo "$out" | grep -q 'claude:.*/cron/line/claude' ||
+  echo "$out" | grep -q 'formatter:.*claude.*/cron/line/claude' ||
     failures+=("$rc_file overrode the CLAUDE_BIN set on the cron line")
 done
 rm -f "$TMP/fakehome/.zshrc" "$TMP/fakehome/.bashrc"
@@ -491,7 +491,7 @@ compgen -G "$TMP/fakehome/.local/state/standup/pending-*.partial" > /dev/null &&
 printf 'export CLAUDE_BIN=/profile/wins/claude\n' > "$TMP/fakehome/.zshrc"
 out=$(CLAUDE_BIN= run "$TMP/empty.log" --check)
 rm -f "$TMP/fakehome/.zshrc"
-echo "$out" | grep -q 'claude:.*/profile/wins/claude' &&
+echo "$out" | grep -q 'formatter:.*claude.*/profile/wins/claude' &&
   failures+=("an empty CLAUDE_BIN on the cron line did not clear the profile export")
 
 # --- 12. share_header from config is the only title after strip -----------

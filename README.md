@@ -125,6 +125,12 @@ Configuration is optional. With none at all, `standup` looks in `~/code`, then
 it is not there, `standup` runs with no configuration rather than falling back.
 Without the flag, the first of `~/.standup.yml` and `./standup.yml` that exists.
 
+The Telegram publisher (`bin/daily-standup.sh`) uses the same home-then-clone
+order when `STANDUP_CONFIG` is unset: `~/.standup.yml`, then `<repo>/standup.yml`.
+It still refuses to run if neither is usable — with no config there is no
+`exclude_repos`, and every repository under your projects root would be published
+by directory name.
+
 **Where it looks for repositories.** The first of these that is set:
 
 1. `--projects-root PATH`
@@ -146,15 +152,22 @@ exclude_repos:
   - some-client-work
   - unannounced-side-project
 
-# Title and closing line of the message you approve and publish.
+# Title, footer, and which LLM CLI formats the morning message.
 # share_header: "📋 Building in public — {date}"
 # share_footer: "#buildinpublic #indiehackers"
+# formatter: cursor
+# formatter_model: composer-2
 ```
 
 ### `repo_name_mapping`
 
 Renames a repository in the output. That is *all* it does — it never decides
 which repositories are scanned.
+
+For the Telegram → X / wip.co pipeline, each published value must be a single
+wip.co project hashtag on its own (e.g. `#myfoodmate`). A display title such as
+`My Food Mate - myfoodmate.net` is fine for local reading, but the publisher
+will refuse the report: it only recognises `#hashtag` project headers.
 
 ### `exclude_repos`
 
@@ -178,6 +191,18 @@ replaced with `YYYY-MM-DD`. If omitted, the default is
 Optional text appended after the report body (after the project-count line).
 Put only the footer contents in the file — a blank line before it is added
 automatically. The same footer goes to Telegram, X, wip.co, and LinkedIn.
+
+### `formatter`
+
+Which CLI summarises the raw standup into the morning message. `claude`
+(default) runs Claude Code (`claude -p`); `cursor` runs the Cursor Agent CLI
+(`agent -p --mode ask`). Override with `STANDUP_FORMATTER`. Point at a binary
+with `FORMATTER_BIN` (or `CLAUDE_BIN` when using Claude).
+
+### `formatter_model`
+
+Model id passed to the formatter. Default `haiku` for Claude; for Cursor, omit
+to use the account default. Override with `FORMATTER_MODEL`.
 
 ## Publishing the report
 
@@ -239,10 +264,11 @@ the button looks fine and collects nothing.
 
 For wip.co, put the API key alone in `~/.config/standup/wip-token`.
 
-Credentials live outside the repository. `standup.yml` is gitignored, and the
-sender **refuses to run without it** rather than falling back to a default —
-with no config there is no `exclude_repos`, and every repository under your
-projects root would be published by directory name.
+Credentials live outside the repository. Put the report config in
+`~/.standup.yml` or `<repo>/standup.yml` (both gitignored patterns); the
+sender **refuses to run without a usable one** rather than falling back to an
+empty default — with no config there is no `exclude_repos`, and every repository
+under your projects root would be published by directory name.
 
 Check what it resolved before trusting it to a scheduler:
 
@@ -266,8 +292,8 @@ Both lines redirect to a log on purpose. A scheduled job that exits non-zero
 with nowhere to say so is indistinguishable from a quiet morning.
 
 Everything is overridable by environment variable: `STANDUP_CONFIG`,
-`STANDUP_CONFIG_DIR`, `STANDUP_STATE_DIR`, `CLAUDE_BIN`, `CLAUDE_TOKEN_ENV`,
-`BIRD_BIN`.
+`STANDUP_CONFIG_DIR`, `STANDUP_STATE_DIR`, `STANDUP_FORMATTER`, `FORMATTER_BIN`,
+`FORMATTER_MODEL`, `CLAUDE_BIN`, `CLAUDE_TOKEN_ENV`, `BIRD_BIN`.
 
 ## `llm-context.md`
 

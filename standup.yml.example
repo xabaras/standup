@@ -7,6 +7,8 @@ repo_name_mapping:
   habit-tracker: "#habittracker"
   ebook-finder: "#ebookfinder"
   daily-journal: "#dailyjournal"
+  # Not this — display titles are not project headers for publish:
+  # myfoodmate: "My Food Mate - myfoodmate.net"
 
 # Optional: repositories to keep out of the report.
 # Every repository under projects_root is reported unless it is named here, so
@@ -23,3 +25,9 @@ exclude_repos:
 # Optional: text appended after the report (Telegram, X, wip.co, LinkedIn).
 # Write only the footer text — a blank line before it is added automatically.
 # share_footer: "#buildinpublic #indiehackers"
+
+# Optional: which CLI formats the morning report. Default: claude
+# formatter: claude   # Claude Code CLI (claude -p)
+# formatter: cursor   # Cursor Agent CLI (agent -p)
+# Optional model; default haiku for claude, account default for cursor if omitted.
+# formatter_model: haiku

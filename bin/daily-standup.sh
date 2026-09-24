@@ -19,8 +19,11 @@ set -euo pipefail
 #   STANDUP_CONFIG_DIR   where the credentials live   (~/.config/standup)
 #   STANDUP_CONFIG       the report config            (<repo>/standup.yml)
 #   STANDUP_STATE_DIR    pending button presses       (~/.local/state/standup)
+#   STANDUP_FORMATTER    claude | cursor              (or formatter: in standup.yml)
+#   FORMATTER_BIN        path to the formatter CLI
+#   FORMATTER_MODEL      model id for the formatter
 #   CLAUDE_TOKEN_ENV     headless Claude Code auth    (~/.config/claude-code-token.env)
-#   CLAUDE_BIN           the Claude CLI               (whatever is on PATH)
+#   CLAUDE_BIN           Claude CLI (alias when formatter is claude)
 # ============================================================================
 
 # readlink -f, not dirname alone: the README teaches symlinking this into
@@ -75,7 +78,8 @@ linkedin_armed() {
 # silently changes WHERE the standup is posted, which is the worst version of
 # this failure and the least visible.
 _OVERRIDES=(CLAUDE_BIN BIRD_BIN BUFFER_BIN CLAUDE_TOKEN_ENV STANDUP_CONFIG STANDUP_CONFIG_DIR
-            STANDUP_STATE_DIR TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID)
+            STANDUP_STATE_DIR STANDUP_FORMATTER FORMATTER_BIN FORMATTER_MODEL
+            TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID)
 for _v in "${_OVERRIDES[@]}"; do
   # ${!_v+set}, not -n: a caller that writes VAR= on the cron line means "empty",
   # and that has to win over a profile export too.
@@ -125,6 +129,138 @@ if [ -f "$CLAUDE_TOKEN_ENV" ]; then
   set -a; source "$CLAUDE_TOKEN_ENV"; set +a
 fi
 
+# Resolve which LLM CLI formats the report. Env wins over standup.yml; defaults
+# keep the historical Claude + haiku behaviour when nothing is set.
+#
+# Sets STANDUP_FORMATTER, FORMATTER_BIN, FORMATTER_MODEL. Safe with a missing
+# config: --check must still work on a fresh clone.
+resolve_formatter() {
+  local cfg="${1:-}" yml_formatter="" yml_model=""
+  if [ -n "$cfg" ] && [ -s "$cfg" ]; then
+    eval "$(RUBYOPT="-Eutf-8:utf-8" ruby -ryaml -rshellwords -e '
+path = ARGV[0]
+raw = File.read(path)
+cfg = YAML.safe_load(raw, permitted_classes: [], permitted_symbols: [], aliases: true) || {}
+cfg = {} unless cfg.is_a?(Hash)
+fmt = (cfg["formatter"] || "").to_s.strip
+model = (cfg["formatter_model"] || "").to_s.strip
+puts "yml_formatter=#{Shellwords.escape(fmt)}"
+puts "yml_model=#{Shellwords.escape(model)}"
+' "$cfg")"
+  fi
+  local fmt
+  fmt="${STANDUP_FORMATTER:-${yml_formatter:-claude}}"
+  fmt=$(printf '%s' "$fmt" | tr '[:upper:]' '[:lower:]')
+  case "$fmt" in
+    claude|cursor) ;;
+    *)
+      echo "WARNING: unknown formatter '$fmt'; using claude" >&2
+      fmt=claude
+      ;;
+  esac
+  local bin model
+  case "$fmt" in
+    claude)
+      model="${FORMATTER_MODEL:-${yml_model:-haiku}}"
+      bin="${FORMATTER_BIN:-${CLAUDE_BIN:-$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")}}"
+      ;;
+    cursor)
+      model="${FORMATTER_MODEL:-${yml_model:-}}"
+      bin="${FORMATTER_BIN:-$(command -v agent 2>/dev/null || echo "$HOME/.local/bin/agent")}"
+      ;;
+  esac
+  STANDUP_FORMATTER="$fmt"
+  FORMATTER_BIN="$bin"
+  FORMATTER_MODEL="$model"
+}
+
+run_with_timeout() {
+  # GNU timeout is not on stock macOS. Prefer timeout, then gtimeout (Homebrew
+  # coreutils), then perl alarm — Perl ships on macOS and keeps the 120s cap
+  # without requiring brew. SECS first, then the command argv.
+  local secs="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  fi
+}
+
+timeout_backend() {
+  if command -v timeout >/dev/null 2>&1; then
+    echo "timeout ($(command -v timeout))"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    echo "gtimeout ($(command -v gtimeout))"
+  elif command -v perl >/dev/null 2>&1; then
+    echo "perl-alarm ($(command -v perl))"
+  else
+    echo "NONE"
+  fi
+}
+
+run_formatter() {
+  local prompt="$1" out="" err rc=0
+  err=$(mktemp 2>/dev/null) || err=""
+  case "$STANDUP_FORMATTER" in
+    claude)
+      if [ -n "$err" ]; then
+        out=$(printf '%s' "$prompt" | run_with_timeout 120 "$FORMATTER_BIN" -p --model "$FORMATTER_MODEL" 2>"$err") || rc=$?
+      else
+        out=$(printf '%s' "$prompt" | run_with_timeout 120 "$FORMATTER_BIN" -p --model "$FORMATTER_MODEL" 2>/dev/null) || rc=$?
+      fi
+      ;;
+    cursor)
+      if [ -n "$FORMATTER_MODEL" ]; then
+        if [ -n "$err" ]; then
+          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --model "$FORMATTER_MODEL" --mode ask -- "$prompt" 2>"$err") || rc=$?
+        else
+          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --model "$FORMATTER_MODEL" --mode ask -- "$prompt" 2>/dev/null) || rc=$?
+        fi
+      else
+        if [ -n "$err" ]; then
+          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --mode ask -- "$prompt" 2>"$err") || rc=$?
+        else
+          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --mode ask -- "$prompt" 2>/dev/null) || rc=$?
+        fi
+      fi
+      ;;
+  esac
+  if [ -z "$out" ] && [ -n "$err" ] && [ -s "$err" ]; then
+    echo "  Formatter stderr: $(head -c 300 "$err" | tr '\n' ' ')" >&2
+  fi
+  [ -n "$err" ] && rm -f "$err"
+  printf '%s' "$out"
+}
+
+# A non-empty YAML with at least one non-comment line. Blank / "---"-only files
+# parse to an empty config and would publish every repository by directory name.
+config_is_usable() {
+  local path="${1:-}"
+  [ -n "$path" ] && [ -s "$path" ] && grep -qE '^[[:space:]]*[^#[:space:]-]' "$path"
+}
+
+# Match standup.rb without --config: ~/.standup.yml, then <repo>/standup.yml.
+# STANDUP_CONFIG in the environment wins and is not searched past.
+# On success sets STANDUP_CONFIG to the chosen path. On failure leaves it alone
+# when it was set by the caller; when searching, leaves it unset.
+resolve_standup_config() {
+  if [ -n "${STANDUP_CONFIG+set}" ]; then
+    config_is_usable "$STANDUP_CONFIG"
+    return $?
+  fi
+  local candidate
+  for candidate in "$HOME/.standup.yml" "$REPO_DIR/standup.yml"; do
+    if config_is_usable "$candidate"; then
+      STANDUP_CONFIG="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ---- Check mode: what did all of that resolve to? ----
 #
 # Placed before the credential check on purpose, and this is the whole point of
@@ -137,19 +273,50 @@ fi
 # first, then PATH, then the documented default. Printing PATH first would
 # name a binary the cron job will never call.
 if [ "${1:-}" = "--check" ]; then
-  cfg="${STANDUP_CONFIG:-$REPO_DIR/standup.yml}"
+  resolve_standup_config || true
+  if config_is_usable "${STANDUP_CONFIG:-}"; then
+    cfg="$STANDUP_CONFIG"
+    cfg_note=""
+  elif [ -n "${STANDUP_CONFIG+set}" ]; then
+    cfg="$STANDUP_CONFIG"
+    cfg_note=" (MISSING or EMPTY — copy standup.yml.example)"
+  else
+    cfg="$HOME/.standup.yml or $REPO_DIR/standup.yml"
+    cfg_note=" (MISSING or EMPTY — copy standup.yml.example)"
+  fi
+  resolve_formatter "${STANDUP_CONFIG:-}"
   echo "repository:    $REPO_DIR"
   echo "standup.rb:    $REPO_DIR/standup.rb $([ -f "$REPO_DIR/standup.rb" ] || echo '(MISSING)')"
   # -s, matching the guard below. With -f an empty config reports as present
   # here and is then refused at run time, so --check would describe a run that
   # cannot happen.
-  echo "report config: $cfg $([ -s "$cfg" ] || echo '(MISSING or EMPTY — copy standup.yml.example)')"
+  echo "report config: $cfg$cfg_note"
   echo "credentials:   $TELEGRAM_CREDS $([ -f "$TELEGRAM_CREDS" ] || echo '(MISSING — copy standup.env.example)')"
   echo "bot token:     $([ -n "${TELEGRAM_BOT_TOKEN:-}" ] && echo set || echo 'NOT SET')"
   echo "chat id:       $([ -n "${TELEGRAM_CHAT_ID:-}" ] && echo set || echo 'NOT SET')"
-  claude_at="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")}"
   bird_at="${BIRD_BIN:-$(PATH="$CRON_PATH" command -v bird 2>/dev/null || echo "$HOME/.npm-global/bin/bird")}"
-  echo "claude:        $claude_at $([ -x "$claude_at" ] || echo '(MISSING — set CLAUDE_BIN)')"
+  formatter_note=""
+  if [ ! -x "$FORMATTER_BIN" ]; then
+    if [ "$STANDUP_FORMATTER" = claude ]; then
+      formatter_note=" (MISSING — set FORMATTER_BIN or CLAUDE_BIN)"
+    else
+      formatter_note=" (MISSING — set FORMATTER_BIN)"
+    fi
+  fi
+  model_note="—"
+  [ -n "$FORMATTER_MODEL" ] && model_note="$FORMATTER_MODEL"
+  echo "formatter:     $STANDUP_FORMATTER  $FORMATTER_BIN  model=$model_note$formatter_note"
+  echo "timeout:       $(timeout_backend)"
+  if config_is_usable "${STANDUP_CONFIG:-}"; then
+    RUBYOPT="-Eutf-8:utf-8" ruby -ryaml -e '
+path = ARGV[0]
+cfg = YAML.safe_load(File.read(path), permitted_classes: [], permitted_symbols: [], aliases: true) || {}
+map = cfg["repo_name_mapping"]
+exit 0 unless map.is_a?(Hash)
+bad = map.select { |_k, v| v.is_a?(String) && !v.strip.match?(/\A#[A-Za-z0-9][A-Za-z0-9_-]*\z/) }
+bad.each { |k, v| warn "mapping warn: #{k} -> #{v.inspect} (need a #hashtag for publish)" }
+' "$STANDUP_CONFIG" 2>&1 | while IFS= read -r line; do echo "  $line"; done
+  fi
   echo "bird:          $bird_at $([ -x "$bird_at" ] || echo '(MISSING — set BIRD_BIN; only needed to post to X)')"
   if linkedin_armed; then
     # The same fallback the publisher uses, or --check calls a binary missing
@@ -295,7 +462,6 @@ fi
 # ---- Config ----
 TODAY=$(date '+%Y-%m-%d')
 STANDUP_BIN="$REPO_DIR/standup.rb"
-STANDUP_CONFIG="${STANDUP_CONFIG:-$REPO_DIR/standup.yml}"
 
 # A missing report config is a leak, not an inconvenience, which is why this
 # refuses to run rather than carrying on with a default.
@@ -306,19 +472,32 @@ STANDUP_CONFIG="${STANDUP_CONFIG:-$REPO_DIR/standup.yml}"
 # to X and wip.co. Every private repository under the projects root would be
 # named, under its own directory name, in public.
 #
+# Lookup matches standup.rb without --config: ~/.standup.yml, then the clone's
+# standup.yml. STANDUP_CONFIG in the environment still wins and is not searched
+# past — an explicit path that is missing stays an error.
+#
 # Checked here and not earlier on purpose: --test and --check must still work on
 # a fresh clone, because proving the bot works is the first thing anyone does.
 # Not just non-empty: a file of blank lines, or one holding nothing but "---",
 # is a zero-byte config as far as the report is concerned, and the whole point
 # of this guard is what an empty config publishes.
-if [ ! -s "$STANDUP_CONFIG" ] || ! grep -qE '^[[:space:]]*[^#[:space:]-]' "$STANDUP_CONFIG"; then
-  echo "ERROR: no usable report config at $STANDUP_CONFIG"
+_CONFIG_FROM_ENV=0
+[ -n "${STANDUP_CONFIG+set}" ] && _CONFIG_FROM_ENV=1
+if ! resolve_standup_config; then
+  if [ "$_CONFIG_FROM_ENV" -eq 1 ]; then
+    echo "ERROR: no usable report config at $STANDUP_CONFIG"
+    echo "Copy standup.yml.example to that path and edit it, or set STANDUP_CONFIG to a usable file."
+  else
+    echo "ERROR: no usable report config"
+    echo "Looked in: $HOME/.standup.yml and $REPO_DIR/standup.yml"
+    echo "Copy standup.yml.example to either path and edit it, or set STANDUP_CONFIG."
+  fi
   # -s, not -f: an empty file parses to an empty config, which is exactly the
   # publish-everything case this guard exists to stop.
-  echo "Copy standup.yml.example to that path and edit it, or set STANDUP_CONFIG."
   echo "Refusing to run: without it, every repository would be published by directory name."
   exit 1
 fi
+unset _CONFIG_FROM_ENV
 
 # share_header / share_footer from standup.yml. {date} → TODAY. Footer is plain
 # text only — the blank line before it is added when appending, not in the file.
@@ -340,6 +519,8 @@ header = header.gsub("{date}", date)
 puts "SHARE_HEADER=#{Shellwords.escape(header)}"
 puts "SHARE_FOOTER=#{Shellwords.escape(footer)}"
 ' "$STANDUP_CONFIG" "$TODAY")" || true
+
+resolve_formatter "$STANDUP_CONFIG"
 
 # Build standup args
 # An array, not a string: word splitting would turn a config path containing a
@@ -369,8 +550,8 @@ No commits $DATE_LABEL. Rest day? 🏖️"
   exit 0
 fi
 
-# ---- Format with Claude (claude -p) ----
-echo "  Formatting with Claude..."
+# ---- Format with the configured LLM CLI ----
+echo "  Formatting with $STANDUP_FORMATTER ($FORMATTER_BIN)..."
 PROMPT="You are formatting a daily developer standup for Telegram.
 
 Date: $TODAY (this is $DATE_LABEL's activity)
@@ -389,12 +570,11 @@ Format this as a concise, scannable Telegram message:
 - Bold ONLY the project hashtag on its own line, with single asterisks (*#project*), never double. Use no other markup anywhere — no italics, no inline bold, no code spans. Every other character is escaped before sending, so a stray marker is published literally to X and wip.co rather than rendered.
 - Output ONLY the formatted message, nothing else"
 
-CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")}"
-ANALYSIS=$(echo "$PROMPT" | timeout 120 "$CLAUDE_BIN" -p --model haiku 2>/dev/null) || ANALYSIS=""
+ANALYSIS=$(run_formatter "$PROMPT") || ANALYSIS=""
 
-# Fallback: if Claude failed, send raw standup (title is prepended after strip)
+# Fallback: if the formatter failed, send raw standup (title is prepended after strip)
 if [ -z "$ANALYSIS" ]; then
-  echo "  Claude formatting failed, using raw fallback"
+  echo "  $STANDUP_FORMATTER formatting failed, using raw fallback"
   ANALYSIS="$RAW_STANDUP"
 fi
 
@@ -447,14 +627,24 @@ Niente da pubblicare: ogni riga era di sicurezza. Nessun report inviato."
     exit 0
     ;;
   3)
-    # The filter ran and refused: the report has no project blocks at all. That
-    # is the formatter having failed upstream, and calling it a dead filter
-    # would send somebody to look in the wrong place.
+    # The filter ran and refused: the report has no project blocks at all.
+    # Often the formatter failed AND repo_name_mapping uses display titles
+    # instead of #hashtags — the raw fallback then has nothing the pipeline
+    # can treat as a project header.
     echo "[$TODAY] The report has no project blocks; nothing sent."
+    if ! printf '%s' "$RAW_STANDUP" | grep -qE '^[[:space:]]*#'; then
+      echo "  Hint: repo_name_mapping values must be wip.co hashtags (e.g. #myfoodmate), not display names."
+    fi
     disarm_today
-    send_telegram "⚠️ $SHARE_HEADER
+    if ! printf '%s' "$RAW_STANDUP" | grep -qE '^[[:space:]]*#'; then
+      send_telegram "⚠️ $SHARE_HEADER
+
+Il report non contiene nessun progetto: in standup.yml ogni mapping pubblicato deve essere un hashtag wip.co (es. #myfoodmate), non un titolo. Non ho inviato niente."
+    else
+      send_telegram "⚠️ $SHARE_HEADER
 
 Il report non contiene nessun progetto: la formattazione è fallita a monte. Non ho inviato niente. Controlla il log."
+    fi
     exit 1
     ;;
   *)
