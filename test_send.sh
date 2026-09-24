@@ -103,6 +103,10 @@ run() { # run <log> <args...>
       ${FAIL_FIRST:+FAIL_FIRST=1} ${OK_BUT_ODD:+OK_BUT_ODD=1} ${FAIL_LAST:+FAIL_LAST=1} \
       ${REJECT_PREVIEW:+REJECT_PREVIEW=1} ${TMPDIR:+TMPDIR=$TMPDIR} \
       ${CLAUDE_BIN+CLAUDE_BIN=$CLAUDE_BIN} \
+      ${STANDUP_FORMATTER+STANDUP_FORMATTER=$STANDUP_FORMATTER} \
+      ${FORMATTER_BIN+FORMATTER_BIN=$FORMATTER_BIN} \
+      ${FORMATTER_MODEL+FORMATTER_MODEL=$FORMATTER_MODEL} \
+      ${AGENT_LOG+AGENT_LOG=$AGENT_LOG} \
       TELEGRAM_BOT_TOKEN=not-a-token TELEGRAM_CHAT_ID=not-a-chat \
       bash "$WORK/bin/daily-standup.sh" "$@" 2>&1
 }
@@ -568,6 +572,80 @@ case " \$* " in
 esac
 printf '#alpha\n• Build config: dart_defines from production.env\n'
 SH
+chmod +x "$TMP/stub/ruby"
+
+# --- 13. Cursor agent as formatter ----------------------------------------
+# Stub agent records argv so we can assert -p / --output-format / --mode / --model.
+# Restore the ordinary claude stub: the share_header tests above leave a different body.
+cat > "$TMP/stub/claude" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '📋 *Daily Standup*\n\n*#alpha*\n• Build config: dart_defines from production.env\n\n1 project.\n'
+SH
+chmod +x "$TMP/stub/claude"
+cat > "$TMP/stub/agent" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${AGENT_LOG:-}" ]; then
+  # Flags only — the prompt after -- can be huge and is not what we assert on.
+  for a in "$@"; do
+    [ "$a" = "--" ] && break
+    printf '%s\n' "$a"
+  done > "$AGENT_LOG"
+fi
+printf '📋 *Daily Standup*\n\n*#alpha*\n• Build config: dart_defines from production.env\n\n1 project.\n'
+SH
+chmod +x "$TMP/stub/agent"
+
+rm -f "$TMP/fakehome"/.local/state/standup/pending-*.json
+: > "$TMP/agent.args"
+out=$(STANDUP_FORMATTER=cursor FORMATTER_BIN="$TMP/stub/agent" \
+      AGENT_LOG="$TMP/agent.args" run "$TMP/cursor.log")
+call "$TMP/cursor.log" 1 | grep -q 'dart\\_defines' ||
+  failures+=("cursor formatter output did not reach Telegram escaped")
+grep -qx -- '-p' "$TMP/agent.args" ||
+  failures+=("agent was not invoked with -p")
+grep -qx -- '--output-format' "$TMP/agent.args" ||
+  failures+=("agent was not invoked with --output-format")
+grep -qx -- 'text' "$TMP/agent.args" ||
+  failures+=("agent was not invoked with text output")
+grep -qx -- '--mode' "$TMP/agent.args" ||
+  failures+=("agent was not invoked with --mode")
+grep -qx -- 'ask' "$TMP/agent.args" ||
+  failures+=("agent was not invoked with --mode ask")
+grep -q -- '--model' "$TMP/agent.args" &&
+  failures+=("agent got --model when FORMATTER_MODEL was unset")
+
+: > "$TMP/agent.args"
+out=$(STANDUP_FORMATTER=cursor FORMATTER_BIN="$TMP/stub/agent" \
+      FORMATTER_MODEL=composer-2 AGENT_LOG="$TMP/agent.args" \
+      run "$TMP/cursor-model.log")
+grep -qx -- '--model' "$TMP/agent.args" ||
+  failures+=("agent did not receive --model when FORMATTER_MODEL was set")
+grep -qx -- 'composer-2' "$TMP/agent.args" ||
+  failures+=("agent did not receive the FORMATTER_MODEL value")
+
+# yml formatter: cursor — agent on PATH (stub), no STANDUP_FORMATTER env.
+printf 'projects_root: %s\nformatter: cursor\nformatter_model: composer-2\n' \
+  "$TMP/projects" > "$WORK/standup.yml"
+: > "$TMP/agent.args"
+out=$(AGENT_LOG="$TMP/agent.args" run "$TMP/cursor-yml.log")
+grep -qx -- '--model' "$TMP/agent.args" ||
+  failures+=("yml formatter: cursor did not call agent with --model")
+grep -qx -- 'composer-2' "$TMP/agent.args" ||
+  failures+=("yml formatter_model did not reach agent")
+out=$(run "$TMP/cursor-yml-check.log" --check)
+echo "$out" | grep -q 'formatter:.*cursor' ||
+  failures+=("--check did not report formatter cursor from yml")
+
+# Env wins over yml: STANDUP_FORMATTER=claude must not call agent.
+printf 'projects_root: %s\nformatter: cursor\n' "$TMP/projects" > "$WORK/standup.yml"
+: > "$TMP/agent.args"
+out=$(STANDUP_FORMATTER=claude AGENT_LOG="$TMP/agent.args" run "$TMP/cursor-env-wins.log")
+[ ! -s "$TMP/agent.args" ] ||
+  failures+=("STANDUP_FORMATTER=claude still invoked agent despite yml cursor")
+call "$TMP/cursor-env-wins.log" 1 | grep -q 'dart\\_defines' ||
+  failures+=("claude path after env override did not reach Telegram")
+printf 'projects_root: %s\n' "$TMP/projects" > "$WORK/standup.yml"
 
 if [ ${#failures[@]} -eq 0 ]; then
   echo 'ok: the report reaches Telegram escaped, retries unescaped, and refuses to send what it could not filter'

@@ -63,7 +63,7 @@ jobs:
           # The documented fallbacks, which are what a machine without either
           # binary on PATH actually gets. A regression to a bare `command -v`
           # would print nothing useful here.
-          echo "$out" | grep -q 'claude:.*\.local/bin/claude' \
+          echo "$out" | grep -q 'formatter:.*claude.*\.local/bin/claude' \
             || { echo "--check did not fall back to the documented claude path"; exit 1; }
           echo "$out" | grep -q 'bird:.*\.npm-global/bin/bird' \
             || { echo "--check did not fall back to the documented bird path"; exit 1; }

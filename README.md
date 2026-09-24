@@ -125,11 +125,10 @@ Configuration is optional. With none at all, `standup` looks in `~/code`, then
 it is not there, `standup` runs with no configuration rather than falling back.
 Without the flag, the first of `~/.standup.yml` and `./standup.yml` that exists.
 
-The Telegram publisher (`bin/daily-standup.sh`) uses the same home-then-clone
-order when `STANDUP_CONFIG` is unset: `~/.standup.yml`, then `<repo>/standup.yml`.
-It still refuses to run if neither is usable — with no config there is no
-`exclude_repos`, and every repository under your projects root would be published
-by directory name.
+The Telegram publisher (`bin/daily-standup.sh`) reads `<repo>/standup.yml`
+unless `STANDUP_CONFIG` points elsewhere. It still refuses to run without a
+usable config — with no config there is no `exclude_repos`, and every repository
+under your projects root would be published by directory name.
 
 **Where it looks for repositories.** The first of these that is set:
 
@@ -265,10 +264,10 @@ the button looks fine and collects nothing.
 For wip.co, put the API key alone in `~/.config/standup/wip-token`.
 
 Credentials live outside the repository. Put the report config in
-`~/.standup.yml` or `<repo>/standup.yml` (both gitignored patterns); the
-sender **refuses to run without a usable one** rather than falling back to an
-empty default — with no config there is no `exclude_repos`, and every repository
-under your projects root would be published by directory name.
+`<repo>/standup.yml` (gitignored), or set `STANDUP_CONFIG`; the sender
+**refuses to run without a usable one** rather than falling back to an empty
+default — with no config there is no `exclude_repos`, and every repository under
+your projects root would be published by directory name.
 
 Check what it resolved before trusting it to a scheduler:
 
