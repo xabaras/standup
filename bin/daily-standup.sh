@@ -213,18 +213,41 @@ run_formatter() {
       fi
       ;;
     cursor)
-      if [ -n "$FORMATTER_MODEL" ]; then
-        if [ -n "$err" ]; then
-          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --model "$FORMATTER_MODEL" --mode ask -- "$prompt" 2>"$err") || rc=$?
-        else
-          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --model "$FORMATTER_MODEL" --mode ask -- "$prompt" 2>/dev/null) || rc=$?
-        fi
+      # --trust in an empty temp dir: under cron, agent refuses without workspace
+      # trust. Do not pass --trust on $HOME or the repo (too broad). --yolo /
+      # --force would also clear the prompt but are far more permissive.
+      local trust_dir
+      trust_dir=$(mktemp -d 2>/dev/null) || trust_dir=""
+      if [ -z "$trust_dir" ]; then
+        echo "  formatter: could not create temp dir for --trust" >&2
+        rc=1
       else
-        if [ -n "$err" ]; then
-          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --mode ask -- "$prompt" 2>"$err") || rc=$?
+        if [ -n "$FORMATTER_MODEL" ]; then
+          if [ -n "$err" ]; then
+            out=$(
+              cd "$trust_dir" && run_with_timeout 120 "$FORMATTER_BIN" -p --trust \
+                --output-format text --model "$FORMATTER_MODEL" --mode ask -- "$prompt" 2>"$err"
+            ) || rc=$?
+          else
+            out=$(
+              cd "$trust_dir" && run_with_timeout 120 "$FORMATTER_BIN" -p --trust \
+                --output-format text --model "$FORMATTER_MODEL" --mode ask -- "$prompt" 2>/dev/null
+            ) || rc=$?
+          fi
         else
-          out=$(run_with_timeout 120 "$FORMATTER_BIN" -p --output-format text --mode ask -- "$prompt" 2>/dev/null) || rc=$?
+          if [ -n "$err" ]; then
+            out=$(
+              cd "$trust_dir" && run_with_timeout 120 "$FORMATTER_BIN" -p --trust \
+                --output-format text --mode ask -- "$prompt" 2>"$err"
+            ) || rc=$?
+          else
+            out=$(
+              cd "$trust_dir" && run_with_timeout 120 "$FORMATTER_BIN" -p --trust \
+                --output-format text --mode ask -- "$prompt" 2>/dev/null
+            ) || rc=$?
+          fi
         fi
+        rm -rf "$trust_dir"
       fi
       ;;
   esac
@@ -232,6 +255,10 @@ run_formatter() {
     echo "  Formatter stderr: $(head -c 300 "$err" | tr '\n' ' ')" >&2
   fi
   [ -n "$err" ] && rm -f "$err"
+  if [ "$rc" -ne 0 ]; then
+    echo "  formatter exited $rc" >&2
+    return 0
+  fi
   printf '%s' "$out"
 }
 
@@ -278,16 +305,6 @@ if [ "${1:-}" = "--check" ]; then
   [ -n "$FORMATTER_MODEL" ] && model_note="$FORMATTER_MODEL"
   echo "formatter:     $STANDUP_FORMATTER  $FORMATTER_BIN  model=$model_note$formatter_note"
   echo "timeout:       $(timeout_backend)"
-  if config_is_usable "$cfg"; then
-    RUBYOPT="-Eutf-8:utf-8" ruby -ryaml -e '
-path = ARGV[0]
-cfg = YAML.safe_load(File.read(path), permitted_classes: [], permitted_symbols: [], aliases: true) || {}
-map = cfg["repo_name_mapping"]
-exit 0 unless map.is_a?(Hash)
-bad = map.select { |_k, v| v.is_a?(String) && !v.strip.match?(/\A#[A-Za-z0-9][A-Za-z0-9_-]*\z/) }
-bad.each { |k, v| warn "mapping warn: #{k} -> #{v.inspect} (need a #hashtag for publish)" }
-' "$cfg" 2>&1 | while IFS= read -r line; do echo "  $line"; done
-  fi
   echo "bird:          $bird_at $([ -x "$bird_at" ] || echo '(MISSING — set BIRD_BIN; only needed to post to X)')"
   if linkedin_armed; then
     # The same fallback the publisher uses, or --check calls a binary missing
@@ -586,24 +603,14 @@ Niente da pubblicare: ogni riga era di sicurezza. Nessun report inviato."
     exit 0
     ;;
   3)
-    # The filter ran and refused: the report has no project blocks at all.
-    # Often the formatter failed AND repo_name_mapping uses display titles
-    # instead of #hashtags — the raw fallback then has nothing the pipeline
-    # can treat as a project header.
+    # The filter ran and refused: the report has no project blocks at all. That
+    # is the formatter having failed upstream, and calling it a dead filter
+    # would send somebody to look in the wrong place.
     echo "[$TODAY] The report has no project blocks; nothing sent."
-    if ! printf '%s' "$RAW_STANDUP" | grep -qE '^[[:space:]]*#'; then
-      echo "  Hint: repo_name_mapping values must be wip.co hashtags (e.g. #myfoodmate), not display names."
-    fi
     disarm_today
-    if ! printf '%s' "$RAW_STANDUP" | grep -qE '^[[:space:]]*#'; then
-      send_telegram "⚠️ $SHARE_HEADER
-
-Il report non contiene nessun progetto: in standup.yml ogni mapping pubblicato deve essere un hashtag wip.co (es. #myfoodmate), non un titolo. Non ho inviato niente."
-    else
-      send_telegram "⚠️ $SHARE_HEADER
+    send_telegram "⚠️ $SHARE_HEADER
 
 Il report non contiene nessun progetto: la formattazione è fallita a monte. Non ho inviato niente. Controlla il log."
-    fi
     exit 1
     ;;
   *)

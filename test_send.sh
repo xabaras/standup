@@ -585,12 +585,24 @@ SH
 chmod +x "$TMP/stub/claude"
 cat > "$TMP/stub/agent" <<'SH'
 #!/usr/bin/env bash
+# Without --trust the real CLI prints Workspace Trust Required; mirror that.
+has_trust=0
+for a in "$@"; do
+  [ "$a" = "--trust" ] && has_trust=1
+done
+if [ "$has_trust" -eq 0 ]; then
+  echo "Workspace Trust Required" >&2
+  exit 1
+fi
 if [ -n "${AGENT_LOG:-}" ]; then
   # Flags only — the prompt after -- can be huge and is not what we assert on.
-  for a in "$@"; do
-    [ "$a" = "--" ] && break
-    printf '%s\n' "$a"
-  done > "$AGENT_LOG"
+  {
+    pwd
+    for a in "$@"; do
+      [ "$a" = "--" ] && break
+      printf '%s\n' "$a"
+    done
+  } > "$AGENT_LOG"
 fi
 printf '📋 *Daily Standup*\n\n*#alpha*\n• Build config: dart_defines from production.env\n\n1 project.\n'
 SH
@@ -604,6 +616,8 @@ call "$TMP/cursor.log" 1 | grep -q 'dart\\_defines' ||
   failures+=("cursor formatter output did not reach Telegram escaped")
 grep -qx -- '-p' "$TMP/agent.args" ||
   failures+=("agent was not invoked with -p")
+grep -qx -- '--trust' "$TMP/agent.args" ||
+  failures+=("agent was not invoked with --trust")
 grep -qx -- '--output-format' "$TMP/agent.args" ||
   failures+=("agent was not invoked with --output-format")
 grep -qx -- 'text' "$TMP/agent.args" ||
@@ -614,6 +628,13 @@ grep -qx -- 'ask' "$TMP/agent.args" ||
   failures+=("agent was not invoked with --mode ask")
 grep -q -- '--model' "$TMP/agent.args" &&
   failures+=("agent got --model when FORMATTER_MODEL was unset")
+# First line of AGENT_LOG is pwd — must not be $HOME or the work tree.
+agent_pwd=$(head -n 1 "$TMP/agent.args")
+case "$agent_pwd" in
+  "$TMP/fakehome"|"$TMP/fakehome"/*|"$WORK"|"$WORK"/*|"$ROOT"|"$ROOT"/*)
+    failures+=("agent --trust cwd was home or the repo: $agent_pwd")
+    ;;
+esac
 
 : > "$TMP/agent.args"
 out=$(STANDUP_FORMATTER=cursor FORMATTER_BIN="$TMP/stub/agent" \
@@ -646,6 +667,41 @@ out=$(STANDUP_FORMATTER=claude AGENT_LOG="$TMP/agent.args" run "$TMP/cursor-env-
 call "$TMP/cursor-env-wins.log" 1 | grep -q 'dart\\_defines' ||
   failures+=("claude path after env override did not reach Telegram")
 printf 'projects_root: %s\n' "$TMP/projects" > "$WORK/standup.yml"
+
+# --- 14. Formatter exit code and unknown name -----------------------------
+# A formatter that prints partial output and exits non-zero must not publish
+# that partial — fall back to the raw standup instead.
+cat > "$TMP/stub/claude" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'partial-should-not-publish\n'
+exit 1
+SH
+chmod +x "$TMP/stub/claude"
+rm -f "$TMP/fakehome"/.local/state/standup/pending-*.json
+out=$(run "$TMP/fmt-rc.log")
+echo "$out" | grep -q 'formatter exited 1' ||
+  failures+=("non-zero formatter exit was not logged: $out")
+call "$TMP/fmt-rc.log" 1 | grep -q 'partial-should-not-publish' &&
+  failures+=("partial formatter stdout reached Telegram despite non-zero exit")
+call "$TMP/fmt-rc.log" 1 | grep -q 'dart_defines\|dart\\_defines' ||
+  failures+=("raw fallback missing after formatter non-zero exit")
+
+# Unknown STANDUP_FORMATTER falls back to claude with a warning.
+cat > "$TMP/stub/claude" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '📋 *Daily Standup*\n\n*#alpha*\n• Build config: dart_defines from production.env\n\n1 project.\n'
+SH
+chmod +x "$TMP/stub/claude"
+: > "$TMP/agent.args"
+out=$(STANDUP_FORMATTER=foo AGENT_LOG="$TMP/agent.args" run "$TMP/unknown-fmt.log")
+echo "$out" | grep -q "unknown formatter 'foo'; using claude" ||
+  failures+=("unknown formatter did not warn and fall back to claude: $out")
+[ ! -s "$TMP/agent.args" ] ||
+  failures+=("unknown formatter still invoked agent")
+call "$TMP/unknown-fmt.log" 1 | grep -q 'dart\\_defines' ||
+  failures+=("unknown-formatter fallback did not reach Telegram")
 
 if [ ${#failures[@]} -eq 0 ]; then
   echo 'ok: the report reaches Telegram escaped, retries unescaped, and refuses to send what it could not filter'

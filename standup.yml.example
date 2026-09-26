@@ -7,8 +7,6 @@ repo_name_mapping:
   habit-tracker: "#habittracker"
   ebook-finder: "#ebookfinder"
   daily-journal: "#dailyjournal"
-  # Not this — display titles are not project headers for publish:
-  # myfoodmate: "My Food Mate - myfoodmate.net"
 
 # Optional: repositories to keep out of the report.
 # Every repository under projects_root is reported unless it is named here, so
