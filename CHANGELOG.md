@@ -6,6 +6,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Report config: one file, or set `STANDUP_CONFIG`.** When both
+  `~/.standup.yml` and `<repo>/standup.yml` exist and `STANDUP_CONFIG` is
+  unset, the morning publisher refuses to run (AMBIGUOUS) instead of silently
+  preferring home. An empty `STANDUP_CONFIG=` is treated like unset. Successful
+  runs still log `using config: …`.
+
 ### Fixed
 
 - **The standup could be sent and then leave a button that did nothing.** The

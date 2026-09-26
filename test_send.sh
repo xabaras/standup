@@ -103,6 +103,7 @@ run() { # run <log> <args...>
       ${FAIL_FIRST:+FAIL_FIRST=1} ${OK_BUT_ODD:+OK_BUT_ODD=1} ${FAIL_LAST:+FAIL_LAST=1} \
       ${REJECT_PREVIEW:+REJECT_PREVIEW=1} ${TMPDIR:+TMPDIR=$TMPDIR} \
       ${CLAUDE_BIN+CLAUDE_BIN=$CLAUDE_BIN} \
+      ${STANDUP_CONFIG+STANDUP_CONFIG=$STANDUP_CONFIG} \
       ${STANDUP_FORMATTER+STANDUP_FORMATTER=$STANDUP_FORMATTER} \
       ${FORMATTER_BIN+FORMATTER_BIN=$FORMATTER_BIN} \
       ${FORMATTER_MODEL+FORMATTER_MODEL=$FORMATTER_MODEL} \
@@ -704,7 +705,59 @@ call "$TMP/unknown-fmt.log" 1 | grep -q 'dart\\_defines' ||
   failures+=("unknown-formatter fallback did not reach Telegram")
 
 # --- 15. Config lookup: home, repo, both, empty STANDUP_CONFIG ------------
-# Placeholder — Round 2 refuses both files (AMBIGUOUS). Filled in after pick.
+# Restore a working formatter first.
+cat > "$TMP/stub/claude" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '📋 *Daily Standup*\n\n*#alpha*\n• Build config: dart_defines from production.env\n\n1 project.\n'
+SH
+chmod +x "$TMP/stub/claude"
+
+# 15a. Both home and repo configs → refuse (AMBIGUOUS), no Telegram send.
+printf 'projects_root: %s\nshare_header: "HOMECFG {date}"\n' "$TMP/projects" \
+  > "$TMP/fakehome/.standup.yml"
+printf 'projects_root: %s\nshare_header: "REPOCFG {date}"\n' "$TMP/projects" \
+  > "$WORK/standup.yml"
+rm -f "$TMP/fakehome"/.local/state/standup/pending-*.json
+: > "$TMP/both.log"
+set +e
+out=$(run "$TMP/both.log")
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || failures+=("both configs should refuse with exit != 0")
+echo "$out" | grep -qi AMBIGUOUS || echo "$out" | grep -q 'both .* exist' ||
+  failures+=("both configs did not report ambiguity: $out")
+[ ! -s "$TMP/both.log" ] ||
+  failures+=("both-config refuse still called Telegram")
+out=$(run "$TMP/both-check.log" --check)
+echo "$out" | grep -q 'AMBIGUOUS' ||
+  failures+=("--check did not report AMBIGUOUS when both configs exist: $out")
+
+# 15b. STANDUP_CONFIG=<repo> overrides the ambiguity and runs.
+out=$(STANDUP_CONFIG="$WORK/standup.yml" run "$TMP/cfg-override.log")
+echo "$out" | grep -q "using config:.*standup.yml" ||
+  failures+=("STANDUP_CONFIG override was not logged")
+call "$TMP/cfg-override.log" 1 | grep -q 'REPOCFG' ||
+  failures+=("STANDUP_CONFIG=<repo> did not use the repo header")
+
+# 15c. Home only works.
+rm -f "$WORK/standup.yml"
+out=$(run "$TMP/home-only.log")
+echo "$out" | grep -q "using config:.*\.standup.yml" ||
+  failures+=("home-only config was not selected")
+call "$TMP/home-only.log" 1 | grep -q 'HOMECFG' ||
+  failures+=("home-only run did not use the home header")
+
+# 15d. Repo only works; empty STANDUP_CONFIG= is treated like unset.
+rm -f "$TMP/fakehome/.standup.yml"
+printf 'projects_root: %s\nshare_header: "REPOCFG {date}"\n' "$TMP/projects" \
+  > "$WORK/standup.yml"
+out=$(STANDUP_CONFIG= run "$TMP/empty-env.log")
+echo "$out" | grep -q "using config:.*standup.yml" ||
+  failures+=("empty STANDUP_CONFIG= did not fall through to repo config")
+call "$TMP/empty-env.log" 1 | grep -q 'REPOCFG' ||
+  failures+=("empty STANDUP_CONFIG= + repo-only did not use repo header")
+
 printf 'projects_root: %s\n' "$TMP/projects" > "$WORK/standup.yml"
 
 if [ ${#failures[@]} -eq 0 ]; then

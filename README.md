@@ -125,16 +125,13 @@ Configuration is optional. With none at all, `standup` looks in `~/code`, then
 it is not there, `standup` runs with no configuration rather than falling back.
 Without the flag, the first of `~/.standup.yml` and `./standup.yml` that exists.
 
-The Telegram publisher (`bin/daily-standup.sh`) uses the same home-then-clone
-order when `STANDUP_CONFIG` is unset: `~/.standup.yml`, then `<repo>/standup.yml`.
-It still refuses to run if neither is usable — with no config there is no
-`exclude_repos`, and every repository under your projects root would be published
-by directory name.
-
-**Home wins over the clone.** If both files exist, `~/.standup.yml` is the one
-that runs. A home config without `exclude_repos` will publish repositories your
-repo `standup.yml` meant to hide — each morning the log line `using config: …`
-shows which file won.
+The Telegram publisher (`bin/daily-standup.sh`) looks for one report config when
+`STANDUP_CONFIG` is unset or empty: `~/.standup.yml` **or** `<repo>/standup.yml`.
+If both files exist it refuses to run until you set `STANDUP_CONFIG` to the one
+you want (AMBIGUOUS). It still refuses if neither is usable — with no config
+there is no `exclude_repos`, and every repository under your projects root would
+be published by directory name. Each successful morning run logs
+`using config: …` so you can see which file is in force.
 
 **Where it looks for repositories.** The first of these that is set:
 
@@ -273,8 +270,8 @@ Credentials live outside the repository. Put the report config in
 `~/.standup.yml` or `<repo>/standup.yml` (both gitignored patterns); the
 sender **refuses to run without a usable one** rather than falling back to an
 empty default — with no config there is no `exclude_repos`, and every repository
-under your projects root would be published by directory name. Prefer one file:
-when both exist, home wins (see Configuration above).
+under your projects root would be published by directory name. Keep exactly one
+of those files, or set `STANDUP_CONFIG` when both exist.
 
 Check what it resolved before trusting it to a scheduler:
 
