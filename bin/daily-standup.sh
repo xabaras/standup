@@ -380,7 +380,7 @@ Here is the raw standup output (each section is a project hashtag, bullets are c
 $RAW_STANDUP
 
 Format this as a concise, scannable Telegram message:
-- Start with exactly this title line (you may bold it with single asterisks): $SHARE_HEADER
+- Do not write a title line. Start directly with the first project hashtag.
 - Group by project hashtag (bold the hashtag)
 - Summarize related commits into one bullet where possible (don't repeat noise like 'chore: bump version')
 - Use plain language, not commit-speak
@@ -392,12 +392,10 @@ Format this as a concise, scannable Telegram message:
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")}"
 ANALYSIS=$(echo "$PROMPT" | timeout 120 "$CLAUDE_BIN" -p --model haiku 2>/dev/null) || ANALYSIS=""
 
-# Fallback: if Claude failed, send raw standup
+# Fallback: if Claude failed, send raw standup (title is prepended after strip)
 if [ -z "$ANALYSIS" ]; then
   echo "  Claude formatting failed, using raw fallback"
-  ANALYSIS="$SHARE_HEADER
-
-$RAW_STANDUP"
+  ANALYSIS="$RAW_STANDUP"
 fi
 
 # The hashtags are data, not prose: wip.co attaches a todo to a project BY the hashtag, and the X
@@ -410,9 +408,7 @@ fi
 REPAIRED=$(printf '%s' "$ANALYSIS" | RAW_STANDUP="$RAW_STANDUP" \
   python3 "$SCRIPT_DIR/standup-publish.py" --repair-headers) && ANALYSIS="$REPAIRED" || {
   echo "  Formatter lost a project; publishing the raw standup instead"
-  ANALYSIS="$SHARE_HEADER
-
-$RAW_STANDUP"
+  ANALYSIS="$RAW_STANDUP"
 }
 
 # Security lines never leave this machine, on any destination — not X, not
@@ -470,6 +466,15 @@ Il filtro delle righe di sicurezza non ha funzionato. Non ho inviato niente, per
     exit 1
     ;;
 esac
+
+# Configured title is the only source: drop whatever title the formatter wrote
+# (if the first line is not a project hashtag), then prepend SHARE_HEADER.
+# Same placement as the footer — after strip-private, so a share_header that is
+# itself a lone #hashtag is never mistaken for an empty project and dropped.
+ANALYSIS=$(printf '%s' "$ANALYSIS" | python3 "$SCRIPT_DIR/standup-publish.py" --drop-title) || ANALYSIS=""
+ANALYSIS="${SHARE_HEADER}
+
+${ANALYSIS}"
 
 # share_footer is config text only: trim already done when loading, and the
 # blank line before it is added here so the yml never needs a leading newline.

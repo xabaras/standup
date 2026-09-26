@@ -63,6 +63,10 @@ exec "$@"
 SH
 chmod +x "$TMP/stub/timeout"
 
+# Real ruby still handles -ryaml / -e for share_* loading. Captured before PATH
+# is narrowed by env -i in run().
+REAL_RUBY="$(command -v ruby)"
+
 # As above, but with the locale and the Python UTF-8 variables removed — the
 # environment cron actually provides. The script is supposed to supply those
 # itself; nothing else here proves it does.
@@ -120,10 +124,10 @@ echo "$out" | grep -q 'Test message sent' ||
 # Real ruby still handles -ryaml / -e: daily-standup.sh loads share_* that way,
 # and a stub that answers every ruby call with a standup body makes `eval`
 # try to run "•" as a command.
-cat > "$TMP/stub/ruby" <<'SH'
+cat > "$TMP/stub/ruby" <<SH
 #!/usr/bin/env bash
-case " $* " in
-  *" -ryaml "*|*" -e "*) exec /usr/bin/ruby "$@" ;;
+case " \$* " in
+  *" -ryaml "*|*" -e "*) exec "$REAL_RUBY" "\$@" ;;
 esac
 printf '#alpha\n• Build config: dart_defines from production.env\n'
 SH
@@ -489,6 +493,81 @@ out=$(CLAUDE_BIN= run "$TMP/empty.log" --check)
 rm -f "$TMP/fakehome/.zshrc"
 echo "$out" | grep -q 'claude:.*/profile/wins/claude' &&
   failures+=("an empty CLAUDE_BIN on the cron line did not clear the profile export")
+
+# --- 12. share_header from config is the only title after strip -----------
+# A share_header that is itself a #hashtag used to be prepended BEFORE
+# strip-private and then dropped as an empty project. Prepend after strip.
+printf 'projects_root: %s\nshare_header: "#alpha"\n' "$TMP/projects" > "$WORK/standup.yml"
+
+# Raw standup must name the same projects the formatter emits, or
+# --repair-headers falls back to raw and the assertions below never see them.
+cat > "$TMP/stub/ruby" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" -ryaml "*|*" -e "*) exec "$REAL_RUBY" "\$@" ;;
+esac
+printf '#beta\n• one\n'
+SH
+chmod +x "$TMP/stub/ruby"
+
+# 12a. Formatter wrote no title — body starts with a project.
+cat > "$TMP/stub/claude" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '*#beta*\n• one\n'
+SH
+chmod +x "$TMP/stub/claude"
+out=$(run "$TMP/share-no-title.log")
+first=$(call "$TMP/share-no-title.log" 1)
+echo "$first" | grep -q 'text=\*\\#alpha\*' ||
+  failures+=("share_header #alpha did not lead Telegram when the formatter omitted a title: $first")
+echo "$first" | grep -q '\\#beta' ||
+  failures+=("project #beta was lost when share_header was prepended")
+
+# 12b. Formatter wrote the old default title — must be dropped, not stacked.
+cat > "$TMP/stub/claude" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '📋 *Daily Standup*\n\n*#beta*\n• one\n'
+SH
+chmod +x "$TMP/stub/claude"
+out=$(run "$TMP/share-wrong-title.log")
+first=$(call "$TMP/share-wrong-title.log" 1)
+echo "$first" | grep -q 'Daily Standup' &&
+  failures+=("LLM title survived after share_header enforce: $first")
+echo "$first" | grep -q 'text=\*\\#alpha\*' ||
+  failures+=("share_header #alpha did not replace the LLM title: $first")
+
+# 12c. Formatter started with *#alpha* (project) — still prepend config header.
+# Raw must match so repair keeps the formatted body.
+cat > "$TMP/stub/ruby" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" -ryaml "*|*" -e "*) exec "$REAL_RUBY" "\$@" ;;
+esac
+printf '#alpha\n• one\n'
+SH
+cat > "$TMP/stub/claude" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '*#alpha*\n• one\n'
+SH
+chmod +x "$TMP/stub/ruby" "$TMP/stub/claude"
+out=$(run "$TMP/share-hash-project.log")
+first=$(call "$TMP/share-hash-project.log" 1)
+# First text= line must start with the config header.
+echo "$first" | grep -q 'text=\*\\#alpha\*' ||
+  failures+=("share_header #alpha missing when body already started with *#alpha*: $first")
+
+# Restore default yml and ruby stub for clarity.
+printf 'projects_root: %s\n' "$TMP/projects" > "$WORK/standup.yml"
+cat > "$TMP/stub/ruby" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" -ryaml "*|*" -e "*) exec "$REAL_RUBY" "\$@" ;;
+esac
+printf '#alpha\n• Build config: dart_defines from production.env\n'
+SH
 
 if [ ${#failures[@]} -eq 0 ]; then
   echo 'ok: the report reaches Telegram escaped, retries unescaped, and refuses to send what it could not filter'

@@ -653,6 +653,31 @@ def _is_header(line):
     return bool(FILTER_HEADER.fullmatch(line.strip()))
 
 
+def drop_leading_title(text):
+    """Remove a leading non-project line the formatter may have written as a title.
+
+    The configured share_header is prepended by daily-standup.sh after this
+    runs, so any title the LLM invented must go first. A report that already
+    starts with a project hashtag (#name / *#name*) is left alone (after
+    trimming leading blank lines).
+    """
+    if not text:
+        return text
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return ""
+    if _is_header(lines[i]):
+        return "\n".join(lines[i:])
+    # Drop the title line and any blank lines that followed it.
+    i += 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    return "\n".join(lines[i:])
+
+
 def strip_private(text):
     """Remove security lines, and any project they leave with nothing to say.
 
@@ -1335,6 +1360,23 @@ def _selftest_body():
     assert stripped_c.splitlines()[0] == custom_title, stripped_c.splitlines()[0]
     assert stripped_c.splitlines()[2] == "#alpha", stripped_c
 
+    # A share_header that is itself a lone #hashtag still composes: bold with
+    # the "#" escaped, and strip_telegram_markup leaves the hashtag intact.
+    hash_title = to_markdown_v2("#alpha\n• one")
+    assert hash_title.splitlines()[0] == "*\\#alpha*", hash_title.splitlines()[0]
+    assert strip_telegram_markup("*#alpha*\n• one").splitlines()[0] == "#alpha"
+
+    # --drop-title removes a prose title so the shell can prepend share_header,
+    # but leaves a leading project hashtag alone.
+    assert drop_leading_title("📋 *Daily Standup*\n\n*#beta*\n• one") == "*#beta*\n• one"
+    assert drop_leading_title("*#beta*\n• one") == "*#beta*\n• one"
+    assert drop_leading_title("#beta\n• one") == "#beta\n• one"
+    drop_cli = subprocess.run(
+        [sys.executable, __file__, "--drop-title"],
+        input="Wrong Title\n\n#beta\n• one", text=True, capture_output=True, check=True,
+    )
+    assert drop_cli.stdout == "#beta\n• one", drop_cli.stdout
+
     # Every reserved character, including a literal backslash. Four assertions
     # would not support "a commit subject can hold anything".
     for ch in "_*[]()~`>#+-=|{}.!\\":
@@ -1980,6 +2022,12 @@ def main():
     # message arrives at all, which is the busy day fit_telegram exists for.
     if "--telegram-plain" in sys.argv:
         sys.stdout.write(fit_telegram(strip_telegram_markup(sys.stdin.read())))
+        return
+
+    # Drop a leading non-project title the formatter may have written. The shell
+    # prepends the configured share_header afterwards.
+    if "--drop-title" in sys.argv:
+        sys.stdout.write(drop_leading_title(sys.stdin.read()))
         return
 
     if "--selftest" in sys.argv:
